@@ -226,10 +226,19 @@ def calculate_metrics(uploaded_data, backfill_df):
     if len(agg) == 0:
         return None, []
 
-    # 按品牌+平台+项目 pivot 回填数据
-    pivoted = backfill_df.groupby(["品牌", "平台", "项目名称", "维度"])["数值"].sum().unstack(fill_value=0).reset_index()
+    bf = backfill_df.copy()
+    bf["数值"] = pd.to_numeric(bf["数值"], errors="coerce").fillna(0)
 
-    # 统一阅读数列名
+    if bf["数值"].sum() == 0:
+        return None, [("FAIL", "全局", "回填数据全部为空或为 0，无法计算")]
+
+    pivoted = (
+        bf.groupby(["品牌", "平台", "项目名称", "维度"])["数值"]
+        .sum()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+
     if "红书阅读数" in pivoted.columns:
         pivoted["阅读数"] = pivoted["红书阅读数"]
     elif "视频观看数" in pivoted.columns:
@@ -237,19 +246,24 @@ def calculate_metrics(uploaded_data, backfill_df):
     else:
         pivoted["阅读数"] = 0
 
-    for col in ["进店UV", "购买人数", "渠道新客数"]:
+    for col in ["进店UV", "购买人数", "渠道新客数", "阅读数"]:
         if col not in pivoted.columns:
             pivoted[col] = 0
 
-    # 合并
     result = agg.merge(
         pivoted[["品牌", "平台", "项目名称", "阅读数", "进店UV", "购买人数", "渠道新客数"]],
         on=["品牌", "平台", "项目名称"], how="left",
     ).fillna(0)
 
-    # 计算衍生指标（带除零保护）
+    # ===== 关键修复：强制所有数值列转成 numeric =====
+    numeric_cols = ["媒体花费", "全店客单价", "单品客单价",
+                    "阅读数", "进店UV", "购买人数", "渠道新客数"]
+    for c in numeric_cols:
+        if c in result.columns:
+            result[c] = pd.to_numeric(result[c], errors="coerce").fillna(0).astype(float)
+
     def safe_div(a, b):
-        return (a / b).where(b != 0, 0)
+        return (a / b).where(b != 0, 0.0)
 
     result["进店率"] = safe_div(result["进店UV"], result["阅读数"])
     result["购买转化率"] = safe_div(result["购买人数"], result["进店UV"])
@@ -259,17 +273,16 @@ def calculate_metrics(uploaded_data, backfill_df):
     result["预估新客GMV"] = result["全店客单价"] * result["渠道新客数"]
     result["预估整体新客ROI"] = safe_div(result["预估新客GMV"], result["媒体花费"])
 
-    # 质检
     issues = []
     for _, r in result.iterrows():
         key = f"{r['品牌']} / {r['项目名称']}"
         if r["阅读数"] == 0:
             issues.append(("FAIL", key, "阅读数为 0，无法计算进店率"))
-        if r["进店UV"] > r["阅读数"] and r["阅读数"] > 0:
+        if r["阅读数"] > 0 and r["进店UV"] > r["阅读数"]:
             issues.append(("FAIL", key, f"进店UV（{int(r['进店UV'])}）> 阅读数（{int(r['阅读数'])}）"))
-        if r["购买人数"] > r["进店UV"] and r["进店UV"] > 0:
+        if r["进店UV"] > 0 and r["购买人数"] > r["进店UV"]:
             issues.append(("FAIL", key, f"购买人数（{int(r['购买人数'])}）> 进店UV（{int(r['进店UV'])}）"))
-        if r["渠道新客数"] > r["购买人数"] and r["购买人数"] > 0:
+        if r["购买人数"] > 0 and r["渠道新客数"] > r["购买人数"]:
             issues.append(("FAIL", key, f"渠道新客数（{int(r['渠道新客数'])}）> 购买人数（{int(r['购买人数'])}）"))
         if r["媒体花费"] <= 0:
             issues.append(("WARN", key, "媒体花费为 0 或负"))
