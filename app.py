@@ -1,4 +1,7 @@
 import streamlit as st
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border
+from copy import copy
 import pandas as pd
 import io
 from datetime import datetime
@@ -721,20 +724,144 @@ elif page == "🧮 计算质检":
             )
 
 # ============ 页面：报告输出 ============
+# ============ 页面：报告输出 ============
 elif page == "📄 报告输出":
     st.markdown('<div class="page-title">报告输出</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="page-subtitle">周期：{period_filter} · 平台：{platform_filter} · 品牌：{brand_filter}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="e2e-card">', unsafe_allow_html=True)
-    report_type = st.radio("报告类型", ["Summary（全品牌汇总）", "品牌明细（单品牌 sheet）", "完整报告（Summary + 所有品牌 sheet）"])
-    brands = st.multiselect("选择品牌", ["品牌A", "品牌B", "品牌C", "品牌D", "品牌E"], default=["品牌A", "品牌B"])
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("生成 Excel", type="primary"):
-            st.success("Excel 生成任务已触发（逻辑待接入）。")
-    with col2:
-        if st.button("预览"):
-            st.info("预览功能待接入。")
-    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state["result_df"] is None:
+        st.warning("请先到「🧮 计算质检」页完成计算。")
+    else:
+        st.markdown('<div class="e2e-card">', unsafe_allow_html=True)
+        st.markdown("#### 生成报告")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            platform_report = st.selectbox("平台", ["RED", "DY"])
+        with col2:
+            period_label = st.text_input("周期标签", value="2026.09.30")
+
+        st.caption(f"将在 Summary sheet 顶部插入 {period_label} 数据块，保留原有历史数据。")
+
+        if st.button("生成报告", type="primary"):
+            try:
+                result_df = st.session_state["result_df"]
+
+                # 只保留当前平台的数据
+                if platform_report == "RED":
+                    df_to_write = result_df[result_df["平台"] == "RED"].copy()
+                    template_path = "templates/RED_template.xlsx"
+                else:
+                    df_to_write = result_df[result_df["平台"] == "DY"].copy()
+                    template_path = "templates/DY_template.xlsx"
+
+                if len(df_to_write) == 0:
+                    st.error(f"没有找到 {platform_report} 平台的数据。")
+                else:
+                    # 读取模板
+                    wb = openpyxl.load_workbook(template_path)
+                    ws = wb["Summary"]
+
+                    # 插入点：第 8 行
+                    insert_row = 8
+                    n_rows = len(df_to_write) + 4
+
+                    # 保存样式（表头第 10 行，数据第 11 行）
+                    header_style = {}
+                    for col in range(1, 19):
+                        c = ws.cell(row=10, column=col)
+                        header_style[col] = (copy(c.font), copy(c.fill), copy(c.border), copy(c.alignment))
+
+                    data_style = {}
+                    for col in range(1, 19):
+                        c = ws.cell(row=11, column=col)
+                        data_style[col] = (copy(c.font), copy(c.fill), copy(c.border), copy(c.alignment))
+
+                    # 插入行
+                    ws.insert_rows(insert_row, n_rows)
+
+                    # 标题行
+                    ws.cell(row=insert_row, column=2, value=f"Campaign起始日期-{period_label}")
+
+                    # 表头（insert_row + 2）
+                    if platform_report == "RED":
+                        header_map = {
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流", 5: "红书阅读数",
+                            6: "归因逻辑", 7: "进店UV\n（=商品页浏览）", 8: "进店UV vs 目标",
+                            9: "进店率\n（=进店UV/阅读数)", 10: "购买转化率\n(=购买人数/进店数)",
+                            11: "购买人数", 12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)", 15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)", 17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            18: "全店客单价",
+                        }
+                    else:
+                        header_map = {
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流", 5: "视频观看数",
+                            6: "归因逻辑", 7: "进店UV\n（=商品页浏览）", 8: "进店UV vs 目标",
+                            9: "进店率\n（=进店UV/阅读数)", 10: "购买转化率\n(=购买人数/进店数)",
+                            11: "购买人数", 12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)", 15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)", 17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            18: "全店客单价",
+                        }
+
+                    for col, val in header_map.items():
+                        cell = ws.cell(row=insert_row + 2, column=col, value=val)
+                        f, fill, b, a = header_style[col]
+                        cell.font = copy(f)
+                        cell.fill = copy(fill)
+                        cell.border = copy(b)
+                        cell.alignment = copy(a)
+
+                    # 数据行
+                    for i, row in df_to_write.iterrows():
+                        r = insert_row + 3 + i
+                        data = {
+                            2: row.get("品牌", ""),
+                            3: "RED KFS" if platform_report == "RED" else "DY",
+                            4: float(row.get("媒体花费", 0)),
+                            5: float(row.get("阅读数", 0)),
+                            6: "",
+                            7: float(row.get("进店UV", 0)),
+                            8: "",
+                            9: float(row.get("进店率", 0)),
+                            10: float(row.get("购买转化率", 0)),
+                            11: float(row.get("购买人数", 0)),
+                            12: float(row.get("渠道新客数", 0)),
+                            13: "",
+                            14: float(row.get("渠道新客占比", 0)),
+                            15: float(row.get("新客成本", 0)),
+                            16: float(row.get("预估新客GMV", 0)),
+                            17: float(row.get("预估整体新客ROI", 0)),
+                            18: float(row.get("全店客单价", 0)),
+                        }
+                        for col, val in data.items():
+                            cell = ws.cell(row=r, column=col, value=val)
+                            f, fill, b, a = data_style[col]
+                            cell.font = copy(f)
+                            cell.fill = copy(fill)
+                            cell.border = copy(b)
+                            cell.alignment = copy(a)
+
+                    # 输出
+                    output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    wb.save(output_path)
+
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="⬇ 下载报告 Excel",
+                            data=f,
+                            file_name=f"E2E_{platform_report}_报告.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    st.success(f"报告已生成，插入了 {len(df_to_write)} 条 {platform_report} 数据。")
+
+            except Exception as e:
+                st.error(f"生成失败：{str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ============ 页面：历史趋势 ============
 elif page == "📈 历史趋势":
