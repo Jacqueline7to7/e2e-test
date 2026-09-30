@@ -1,10 +1,14 @@
 import streamlit as st
+import pandas as pd
+import io
+import os
+from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border
 from copy import copy
-import pandas as pd
-import io
-from datetime import datetime
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 
 st.set_page_config(
     page_title="E2E 自动化交付平台",
