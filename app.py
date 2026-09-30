@@ -827,22 +827,14 @@ elif page == "📄 报告输出":
                 def snapshot_merges(ws):
                     return [(str(m)) for m in ws.merged_cells.ranges]
 
-                def remap_merges(ws, old_merges, insert_row, n_rows):
-                    # 清空现有 merges（保留 openpyxl 允许的操作方式）
-                    for m in list(ws.merged_cells.ranges):
-                        ws.unmerge_cells(str(m))
-                    # 重新计算
-                    for m in old_merges:
-                        mm = re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', m)
-                        if not mm:
-                            continue
-                        c1, r1, c2, r2 = mm.group(1), int(mm.group(2)), mm.group(3), int(mm.group(4))
+                def remap_merges(ws, _unused, insert_row, n_rows):
+                    for mr in list(ws.merged_cells.ranges):
+                        r1 = mr.min_row
+                        r2 = mr.max_row
                         if r1 >= insert_row:
-                            r1 += n_rows
-                            r2 += n_rows
+                            mr.shift(row_shift=n_rows)
                         elif r2 >= insert_row:
-                            r2 += n_rows
-                        ws.merge_cells(f"{c1}{r1}:{c2}{r2}")
+                            mr.max_row = r2 + n_rows
 
                 # ============================================================
                 # 品牌 sheet
