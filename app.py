@@ -178,7 +178,6 @@ def match_backfill(fetch_df, backfill_df):
 
 # ============ 聚合上传数据 ============
 def aggregate_uploaded(uploaded_data):
-    """按 品牌+平台+项目 聚合，提取花费、客单价"""
     rows = []
     for item in uploaded_data:
         df = item.get("df")
@@ -186,6 +185,7 @@ def aggregate_uploaded(uploaded_data):
         if df is None:
             continue
         for _, r in df.iterrows():
+            category = str(r.get("Category", ""))
             if plat == "RED":
                 brand = r.get("Brand", "")
                 product = r.get("Product", "")
@@ -210,21 +210,15 @@ def aggregate_uploaded(uploaded_data):
                 aov = pd.to_numeric(r.get("DY全店客单价", 0), errors="coerce") or 0
                 item_aov = pd.to_numeric(r.get("DY单品主链客单价", 0), errors="coerce") or 0
             rows.append({
-                "品牌": str(brand),
-                "平台": plat,
-                "项目名称": str(project),
-                "产品": str(product),
-                "媒体花费": spend,
-                "全店客单价": aov,
-                "单品客单价": item_aov,
+                "品牌": str(brand), "平台": plat, "项目名称": str(project),
+                "产品": str(product), "Category": category,
+                "媒体花费": spend, "全店客单价": aov, "单品客单价": item_aov,
             })
     if not rows:
-        return pd.DataFrame(columns=["品牌", "平台", "项目名称", "产品", "媒体花费", "全店客单价", "单品客单价"])
+        return pd.DataFrame(columns=["品牌", "平台", "项目名称", "产品", "Category", "媒体花费", "全店客单价", "单品客单价"])
     return pd.DataFrame(rows).groupby(["品牌", "平台", "项目名称"], as_index=False).agg({
-        "产品": "first",
-        "媒体花费": "sum",
-        "全店客单价": "first",
-        "单品客单价": "first",
+        "产品": "first", "Category": "first",
+        "媒体花费": "sum", "全店客单价": "first", "单品客单价": "first",
     })
 
 # ============ 计算 E2E 指标 ============
@@ -921,7 +915,65 @@ elif page == "📄 报告输出":
 
                         if data_height:
                             ws.row_dimensions[r].height = data_height
+                    # ===== 步骤 9：计算并写入品牌组合 Ave. 行 =====
+                    def calc_portfolio(df, brands):
+                        sub = df[df["品牌"].isin(brands)]
+                        if len(sub) == 0:
+                            return None
+                        spend = sub["媒体花费"].sum()
+                        read = sub["阅读数"].sum()
+                        visit = sub["进店UV"].sum()
+                        buyer = sub["购买人数"].sum()
+                        new_cust = sub["渠道新客数"].sum()
+                        gmv = sub["预估新客GMV"].sum()
+                        return {
+                            "媒体花费": spend, "阅读数": read, "进店UV": visit,
+                            "进店率": visit / read if read else 0,
+                            "购买转化率": buyer / visit if visit else 0,
+                            "购买人数": buyer, "渠道新客数": new_cust,
+                            "渠道新客占比": new_cust / buyer if buyer else 0,
+                            "新客成本": spend / new_cust if new_cust else 0,
+                            "预估新客GMV": gmv,
+                            "预估整体新客ROI": gmv / spend if spend else 0,
+                            "全店客单价": gmv / new_cust if new_cust else 0,
+                        }
 
+                    cat = df_to_write.get("Category", pd.Series([""] * len(df_to_write))).astype(str).str.lower()
+                    makeup_brands = df_to_write[cat.str.contains("make", na=False)]["品牌"].tolist()
+                    frag_brands = df_to_write[cat.str.contains("fragrance", na=False)]["品牌"].tolist()
+                    skincare_brands = df_to_write[cat.str.contains("skincare", na=False)]["品牌"].tolist()
+                    all_brands = df_to_write["品牌"].unique().tolist()
+
+                    portfolios = [
+                        ("品牌组合 护肤 Ave.", skincare_brands),
+                        ("品牌组合 FRAG. Ave.", frag_brands),
+                        ("品牌组合 彩妆 Ave.", makeup_brands),
+                        ("品牌组合 Ave.", all_brands),
+                    ]
+
+                    for i, (label, brands) in enumerate(portfolios):
+                        r = header_row + 1 + n_data + i
+                        apply_style(r, data_style)
+                        ws.cell(row=r, column=7).value = label   # ← 标签写在 G 列（进店UV）
+                        res = calc_portfolio(df_to_write, brands)
+                        if res:
+                            ws.cell(row=r, column=4).value = res["媒体花费"]
+                            ws.cell(row=r, column=5).value = res["阅读数"]
+                            ws.cell(row=r, column=9).value = res["进店率"]
+                            ws.cell(row=r, column=10).value = res["购买转化率"]
+                            ws.cell(row=r, column=11).value = res["购买人数"]
+                            ws.cell(row=r, column=12).value = res["渠道新客数"]
+                            ws.cell(row=r, column=14).value = res["渠道新客占比"]
+                            ws.cell(row=r, column=15).value = res["新客成本"]
+                            ws.cell(row=r, column=16).value = res["预估新客GMV"]
+                            ws.cell(row=r, column=17).value = res["预估整体新客ROI"]
+                            ws.cell(row=r, column=18).value = res["全店客单价"]
+
+                    # ===== 步骤 10：所有 Brand 表头行行高固定 45 =====
+                    for row in range(1, ws.max_row + 1):
+                        if ws.cell(row=row, column=2).value == "Brand":
+                            ws.row_dimensions[row].height = 45
+                            
                     # ===== 保存 =====
                     output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                     wb.save(output_path)
