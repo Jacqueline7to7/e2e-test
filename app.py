@@ -724,8 +724,8 @@ elif page == "🧮 计算质检":
             )
 
 # ============ 页面：报告输出 ============
-# ============ 页面：报告输出 ============
 elif page == "📄 报告输出":
+    import re
     st.markdown('<div class="page-title">报告输出</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="page-subtitle">周期：{period_filter} · 平台：{platform_filter} · 品牌：{brand_filter}</div>', unsafe_allow_html=True)
 
@@ -747,103 +747,150 @@ elif page == "📄 报告输出":
             try:
                 result_df = st.session_state["result_df"]
 
-                # 只保留当前平台的数据
                 if platform_report == "RED":
                     df_to_write = result_df[result_df["平台"] == "RED"].copy()
-                    template_path = "templates/RED_template.xlsx"
+                    template_path = os.path.join(TEMPLATE_DIR, "RED_template.xlsx")
                 else:
                     df_to_write = result_df[result_df["平台"] == "DY"].copy()
-                    template_path = "templates/DY_template.xlsx"
+                    template_path = os.path.join(TEMPLATE_DIR, "DY_template.xlsx")
 
                 if len(df_to_write) == 0:
                     st.error(f"没有找到 {platform_report} 平台的数据。")
                 else:
-                    # 读取模板
                     wb = openpyxl.load_workbook(template_path)
                     ws = wb["Summary"]
 
-                    # 插入点：第 8 行
                     insert_row = 8
-                    n_rows = len(df_to_write) + 4
+                    n_data = len(df_to_write)
+                    n_rows = 2 + n_data  # 标题 + 表头 + N 数据行
 
-                    # 保存样式（表头第 10 行，数据第 11 行）
-                    header_style = {}
-                    for col in range(1, 19):
-                        c = ws.cell(row=10, column=col)
-                        header_style[col] = (copy(c.font), copy(c.fill), copy(c.border), copy(c.alignment))
+                    # ===== 步骤 1：读取插入前所有公式 =====
+                    formula_map = {}
+                    for row in ws.iter_rows():
+                        for cell in row:
+                            if isinstance(cell.value, str) and cell.value.startswith("="):
+                                formula_map[cell.coordinate] = cell.value
 
-                    data_style = {}
-                    for col in range(1, 19):
-                        c = ws.cell(row=11, column=col)
-                        data_style[col] = (copy(c.font), copy(c.fill), copy(c.border), copy(c.alignment))
-
-                    # 插入行
+                    # ===== 步骤 2：插入行 =====
                     ws.insert_rows(insert_row, n_rows)
 
-                    # 标题行
-                    ws.cell(row=insert_row, column=2, value=f"Campaign起始日期-{period_label}")
+                    # ===== 步骤 3：修正插入点以下原数据的公式引用 =====
+                    pattern = re.compile(r'(\$?)([A-Z]+)(\$?)(\d+)')
 
-                    # 表头（insert_row + 2）
+                    def shift_ref(match):
+                        cd, col, rd, rn = match.groups()
+                        rn = int(rn)
+                        if rn >= insert_row:
+                            rn += n_rows
+                        return f"{cd}{col}{rd}{rn}"
+
+                    for old_coord, formula in formula_map.items():
+                        m = re.match(r'([A-Z]+)(\d+)', old_coord)
+                        old_col, old_row = m.group(1), int(m.group(2))
+                        if old_row >= insert_row:
+                            new_row = old_row + n_rows
+                            new_formula = pattern.sub(shift_ref, formula)
+                            ws[f"{old_col}{new_row}"] = new_formula
+
+                    # ===== 步骤 4：写标题行 =====
+                    title_row = insert_row
+                    title_cell = ws.cell(row=title_row, column=2,
+                                         value=f"Campaign起始日期-{period_label}")
+                    title_cell.font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
+                    title_cell.fill = PatternFill(start_color="000000", end_color="000000",
+                                                  fill_type="solid")
+                    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                    # ===== 步骤 5：写表头行（紧接标题，无空行） =====
+                    header_row = insert_row + 1
                     if platform_report == "RED":
                         header_map = {
-                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流", 5: "红书阅读数",
-                            6: "归因逻辑", 7: "进店UV\n（=商品页浏览）", 8: "进店UV vs 目标",
-                            9: "进店率\n（=进店UV/阅读数)", 10: "购买转化率\n(=购买人数/进店数)",
-                            11: "购买人数", 12: "渠道新客数", 13: "渠道新客数 vs 目标",
-                            14: "渠道新客占比\n(=渠道新客/购买人数)", 15: "新客成本\n(=媒体花费/渠道新客数)",
-                            16: "预估新客GMV\n(=客单价*新客数)", 17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流",
+                            5: "红书阅读数", 6: "归因逻辑", 7: "进店UV\n（=商品页浏览）",
+                            8: "进店UV vs 目标", 9: "进店率\n（=进店UV/阅读数)",
+                            10: "购买转化率\n(=购买人数/进店数)", 11: "购买人数",
+                            12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)",
+                            15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)",
+                            17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
                             18: "全店客单价",
                         }
                     else:
                         header_map = {
-                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流", 5: "视频观看数",
-                            6: "归因逻辑", 7: "进店UV\n（=商品页浏览）", 8: "进店UV vs 目标",
-                            9: "进店率\n（=进店UV/阅读数)", 10: "购买转化率\n(=购买人数/进店数)",
-                            11: "购买人数", 12: "渠道新客数", 13: "渠道新客数 vs 目标",
-                            14: "渠道新客占比\n(=渠道新客/购买人数)", 15: "新客成本\n(=媒体花费/渠道新客数)",
-                            16: "预估新客GMV\n(=客单价*新客数)", 17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流",
+                            5: "视频观看数", 6: "归因逻辑", 7: "进店UV\n（=商品页浏览）",
+                            8: "进店UV vs 目标", 9: "进店率\n（=进店UV/阅读数)",
+                            10: "购买转化率\n(=购买人数/进店数)", 11: "购买人数",
+                            12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)",
+                            15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)",
+                            17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
                             18: "全店客单价",
                         }
 
+                    header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9",
+                                              fill_type="solid")
+                    header_font = Font(name="微软雅黑", bold=True, size=10, color="000000")
+                    header_align = Alignment(horizontal="center", vertical="center",
+                                             wrap_text=True)
+
                     for col, val in header_map.items():
-                        cell = ws.cell(row=insert_row + 2, column=col, value=val)
-                        f, fill, b, a = header_style[col]
-                        cell.font = copy(f)
-                        cell.fill = copy(fill)
-                        cell.border = copy(b)
-                        cell.alignment = copy(a)
+                        cell = ws.cell(row=header_row, column=col, value=val)
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = header_align
 
-                    # 数据行
-                    for i, row in df_to_write.iterrows():
-                        r = insert_row + 3 + i
-                        data = {
-                            2: row.get("品牌", ""),
-                            3: "RED KFS" if platform_report == "RED" else "DY",
-                            4: float(row.get("媒体花费", 0)),
-                            5: float(row.get("阅读数", 0)),
-                            6: "",
-                            7: float(row.get("进店UV", 0)),
-                            8: "",
-                            9: float(row.get("进店率", 0)),
-                            10: float(row.get("购买转化率", 0)),
-                            11: float(row.get("购买人数", 0)),
-                            12: float(row.get("渠道新客数", 0)),
-                            13: "",
-                            14: float(row.get("渠道新客占比", 0)),
-                            15: float(row.get("新客成本", 0)),
-                            16: float(row.get("预估新客GMV", 0)),
-                            17: float(row.get("预估整体新客ROI", 0)),
-                            18: float(row.get("全店客单价", 0)),
-                        }
-                        for col, val in data.items():
-                            cell = ws.cell(row=r, column=col, value=val)
-                            f, fill, b, a = data_style[col]
-                            cell.font = copy(f)
-                            cell.fill = copy(fill)
-                            cell.border = copy(b)
-                            cell.alignment = copy(a)
+                    # 表头行行高固定 45
+                    ws.row_dimensions[header_row].height = 45
 
-                    # 输出
+                    # ===== 步骤 6：写数据行（衍生指标用公式） =====
+                    data_font = Font(name="微软雅黑", size=10)
+                    data_align = Alignment(horizontal="center", vertical="center")
+
+                    for i, (_, row) in enumerate(df_to_write.iterrows()):
+                        r = header_row + 1 + i
+
+                        ws.cell(row=r, column=2, value=row.get("品牌", ""))
+                        ws.cell(row=r, column=3, value="RED KFS" if platform_report == "RED" else "DY")
+                        ws.cell(row=r, column=4, value=float(row.get("媒体花费", 0)))
+                        ws.cell(row=r, column=5, value=float(row.get("阅读数", 0)))
+                        ws.cell(row=r, column=6, value="")
+                        ws.cell(row=r, column=7, value=float(row.get("进店UV", 0)))
+                        ws.cell(row=r, column=8, value="")
+                        # 衍生指标 → 公式
+                        ws.cell(row=r, column=9, value=f"=G{r}/E{r}")   # 进店率
+                        ws.cell(row=r, column=10, value=f"=K{r}/G{r}")  # 购买转化率
+                        ws.cell(row=r, column=11, value=float(row.get("购买人数", 0)))
+                        ws.cell(row=r, column=12, value=float(row.get("渠道新客数", 0)))
+                        ws.cell(row=r, column=13, value="")
+                        ws.cell(row=r, column=14, value=f"=L{r}/K{r}")  # 渠道新客占比
+                        ws.cell(row=r, column=15, value=f"=D{r}/L{r}")  # 新客成本
+                        ws.cell(row=r, column=16, value=f"=L{r}*R{r}")  # 预估新客GMV
+                        ws.cell(row=r, column=17, value=f"=P{r}/D{r}")  # 预估整体新客ROI
+                        ws.cell(row=r, column=18, value=float(row.get("全店客单价", 0)))
+
+                        # 统一字体和对齐
+                        for c in range(2, 19):
+                            ws.cell(row=r, column=c).font = data_font
+                            ws.cell(row=r, column=c).alignment = data_align
+
+                        # 数字格式
+                        ws.cell(row=r, column=4).number_format = "#,##0"    # 媒体花费
+                        ws.cell(row=r, column=5).number_format = "#,##0"    # 阅读数
+                        ws.cell(row=r, column=7).number_format = "#,##0"    # 进店UV
+                        ws.cell(row=r, column=9).number_format = "0.0%"     # 进店率
+                        ws.cell(row=r, column=10).number_format = "0.0%"    # 购买转化率
+                        ws.cell(row=r, column=11).number_format = "#,##0"   # 购买人数
+                        ws.cell(row=r, column=12).number_format = "#,##0"   # 渠道新客数
+                        ws.cell(row=r, column=14).number_format = "0.0%"    # 渠道新客占比
+                        ws.cell(row=r, column=15).number_format = "#,##0"   # 新客成本
+                        ws.cell(row=r, column=16).number_format = "#,##0"   # 预估新客GMV
+                        ws.cell(row=r, column=17).number_format = "0.0"     # 预估整体新客ROI
+                        ws.cell(row=r, column=18).number_format = "#,##0"   # 全店客单价
+
+                    # 保存
                     output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                     wb.save(output_path)
 
@@ -854,7 +901,7 @@ elif page == "📄 报告输出":
                             file_name=f"E2E_{platform_report}_报告.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         )
-                    st.success(f"报告已生成，插入了 {len(df_to_write)} 条 {platform_report} 数据。")
+                    st.success(f"报告已生成：{n_data} 条 {platform_report} 数据，共插入 {n_rows} 行。")
 
             except Exception as e:
                 st.error(f"生成失败：{str(e)}")
