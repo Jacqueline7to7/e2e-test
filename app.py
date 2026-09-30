@@ -823,7 +823,7 @@ elif page == "📄 报告输出":
 
                     # ===== 步骤 4：插入行 =====
                     n_data = len(df_to_write)
-                    n_rows = 2 + n_data   # 标题 + 表头 + N 数据
+                    n_rows = 8 + n_data  # 标题 + 表头 + N 品牌 + 4 品牌组合 + 2 空行
                     insert_row = old_title_row
                     ws.insert_rows(insert_row, n_rows)
 
