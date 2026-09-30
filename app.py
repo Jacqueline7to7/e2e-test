@@ -730,7 +730,7 @@ elif page == "🧮 计算质检":
 # ============ 页面：报告输出 ============
 elif page == "📄 报告输出":
     import re
-    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.utils import column_index_from_string, get_column_letter
 
     st.markdown('<div class="page-title">报告输出</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="page-subtitle">周期：{period_filter} · 平台：{platform_filter} · 品牌：{brand_filter}</div>', unsafe_allow_html=True)
@@ -747,37 +747,12 @@ elif page == "📄 报告输出":
         with col2:
             period_label = st.text_input("周期标签", value="2026.09.30")
 
-        st.caption("新块简化为灰底 + 边框；历史数据样式/合并/公式完全保留。")
+        st.caption(f"将在原数据块上方插入 {period_label} 数据块，样式完全复制原块。")
 
         if st.button("生成报告", type="primary"):
             try:
                 result_df = st.session_state["result_df"]
-                uploaded_data = st.session_state["uploaded_data"]
 
-                # ---------- Category 映射 ----------
-                cat_map = {}
-                for item in uploaded_data:
-                    d = item.get("df")
-                    plat = item["平台"]
-                    if d is None:
-                        continue
-                    for _, rr in d.iterrows():
-                        cat = str(rr.get("Category", "")).strip()
-                        if plat == "RED":
-                            key = (plat, str(rr.get("Brand", "")), str(rr.get("Product", "")))
-                        else:
-                            key = (plat, str(rr.get("Product", "")), str(rr.get("Product", "")))
-                        cat_map[key] = cat
-
-                def get_category(plat, brand, product):
-                    if (plat, brand, product) in cat_map:
-                        return cat_map[(plat, brand, product)]
-                    for (p, b, pr), c in cat_map.items():
-                        if p == plat and pr == product:
-                            return c
-                    return ""
-
-                # ---------- 数据 ----------
                 if platform_report == "RED":
                     df_to_write = result_df[result_df["平台"] == "RED"].copy()
                     template_path = os.path.join(TEMPLATE_DIR, "RED_template.xlsx")
@@ -786,320 +761,179 @@ elif page == "📄 报告输出":
                     template_path = os.path.join(TEMPLATE_DIR, "DY_template.xlsx")
 
                 if len(df_to_write) == 0:
-                    st.error(f"没有 {platform_report} 数据。")
-                    st.stop()
+                    st.error(f"没有找到 {platform_report} 平台的数据。")
+                else:
+                    wb = openpyxl.load_workbook(template_path)
+                    ws = wb["Summary"]
 
-                wb = openpyxl.load_workbook(template_path)
+                    # ===== 步骤 1：找到原数据块的行位置 =====
+                    old_title_row = None
+                    for row in range(1, ws.max_row + 1):
+                        val = ws.cell(row=row, column=2).value
+                        if val and "Campaign起始日期" in str(val):
+                            old_title_row = row
+                            break
 
-                # ---------- 简化样式 ----------
-                THIN = Side(style="thin", color="D0D0D0")
-                BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-                FILL_HEADER = PatternFill("solid", fgColor="F2F2F2")
-                FILL_TITLE = PatternFill("solid", fgColor="E7E6E6")
-                FONT_BOLD = Font(bold=True, size=11)
-                FONT_NORMAL = Font(size=11)
-                ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
+                    if old_title_row is None:
+                        st.error("找不到原 Campaign 标题行，请检查模板结构。")
+                        st.stop()
 
-                # ---------- 工具 ----------
-                def snapshot_formulas(ws):
-                    m = {}
+                    old_header_row = None
+                    for row in range(old_title_row + 1, ws.max_row + 1):
+                        val = ws.cell(row=row, column=2).value
+                        if val == "Brand":
+                            old_header_row = row
+                            break
+
+                    old_data_row = old_header_row + 1
+
+                    # ===== 步骤 2：捕获原块样式 =====
+                    NCOLS = 30
+
+                    def capture_style(row):
+                        result = {}
+                        for c in range(1, NCOLS + 1):
+                            cell = ws.cell(row=row, column=c)
+                            result[c] = {
+                                "font": copy(cell.font),
+                                "fill": copy(cell.fill),
+                                "border": copy(cell.border),
+                                "alignment": copy(cell.alignment),
+                                "number_format": cell.number_format,
+                            }
+                        return result
+
+                    def apply_style(row, style):
+                        for c, s in style.items():
+                            cell = ws.cell(row=row, column=c)
+                            cell.font = copy(s["font"])
+                            cell.fill = copy(s["fill"])
+                            cell.border = copy(s["border"])
+                            cell.alignment = copy(s["alignment"])
+                            cell.number_format = s["number_format"]
+
+                    title_style = capture_style(old_title_row)
+                    header_style = capture_style(old_header_row)
+                    data_style = capture_style(old_data_row)
+
+                    title_height = ws.row_dimensions[old_title_row].height
+                    header_height = ws.row_dimensions[old_header_row].height
+                    data_height = ws.row_dimensions[old_data_row].height
+
+                    # ===== 步骤 3：保存所有公式 =====
+                    formula_map = {}
                     for row in ws.iter_rows():
                         for cell in row:
                             if isinstance(cell.value, str) and cell.value.startswith("="):
-                                m[(cell.row, cell.column)] = cell.value
-                    return m
+                                formula_map[(cell.row, cell.column)] = cell.value
 
-                pat = re.compile(r'(\$?)([A-Z]{1,3})(\$?)(\d+)')
+                    # ===== 步骤 4：插入行 =====
+                    n_data = len(df_to_write)
+                    n_rows = 2 + n_data   # 标题 + 表头 + N 数据
+                    insert_row = old_title_row
+                    ws.insert_rows(insert_row, n_rows)
 
-                def shift_formulas(ws, formula_map, insert_row, n_rows):
-                    def repl(m):
-                        cd, col, rd, rn = m.groups()
+                    # ===== 步骤 5：修正所有公式的行号引用 =====
+                    pattern = re.compile(r'(\$?)([A-Z]{1,3})(\$?)(\d+)')
+
+                    def shift_ref(match):
+                        cd, col, rd, rn = match.groups()
                         rn = int(rn)
                         if rn >= insert_row:
                             rn += n_rows
                         return f"{cd}{col}{rd}{rn}"
-                    for (old_r, old_c), f in formula_map.items():
-                        nf = pat.sub(repl, f)
-                        new_r = old_r + n_rows if old_r >= insert_row else old_r
-                        ws.cell(row=new_r, column=old_c).value = nf
 
-                def snapshot_merges(ws):
-                    return [(str(m)) for m in ws.merged_cells.ranges]
+                    for (old_r, old_c), formula in formula_map.items():
+                        new_formula = pattern.sub(shift_ref, formula)
+                        if old_r >= insert_row:
+                            new_r = old_r + n_rows
+                            ws.cell(row=new_r, column=old_c).value = new_formula
+                        else:
+                            ws.cell(row=old_r, column=old_c).value = new_formula
 
-                def remap_merges(ws, _unused, insert_row, n_rows):
-                    for mr in list(ws.merged_cells.ranges):
-                        r1 = mr.min_row
-                        r2 = mr.max_row
-                        if r1 >= insert_row:
-                            mr.shift(row_shift=n_rows)
-                        elif r2 >= insert_row:
-                            mr.max_row = r2 + n_rows
+                    # ===== 步骤 6：写新标题行（样式复制原标题行） =====
+                    title_row = insert_row
+                    apply_style(title_row, title_style)
+                    ws.cell(row=title_row, column=2).value = f"Campaign起始日期-{period_label}"
+                    if title_height:
+                        ws.row_dimensions[title_row].height = title_height
 
-                # ============================================================
-                # 品牌 sheet
-                # ============================================================
-                brand_block_info = {}
+                    # ===== 步骤 7：写新表头行（样式复制原表头行） =====
+                    header_row = insert_row + 1
+                    apply_style(header_row, header_style)
 
-                for brand in df_to_write["品牌"].unique().tolist():
-                    if brand not in wb.sheetnames:
-                        continue
-                    ws_b = wb[brand]
-
-                    old_title_row = None
-                    for row in range(1, ws_b.max_row + 1):
-                        for c in (1, 2, 3):
-                            v = ws_b.cell(row=row, column=c).value
-                            if v and "Performance Tracking" in str(v):
-                                old_title_row = row
-                                break
-                        if old_title_row:
-                            break
-                    if old_title_row is None:
-                        continue
-
-                    old_header_row = None
-                    for row in range(old_title_row + 1, min(old_title_row + 30, ws_b.max_row + 1)):
-                        vals = [ws_b.cell(row=row, column=c).value for c in range(1, 12)]
-                        if any(v == "Data Period" for v in vals if v):
-                            old_header_row = row
-                            break
-                    if old_header_row is None:
-                        continue
-
-                    b_df = df_to_write[df_to_write["品牌"] == brand].copy()
-                    n_data = len(b_df)
-                    n_rows = 11 + n_data
-                    insert_row = old_title_row
-
-                    fmap = snapshot_formulas(ws_b)
-                    merges = snapshot_merges(ws_b)
-                    ws_b.insert_rows(insert_row, n_rows)
-                    shift_formulas(ws_b, fmap, insert_row, n_rows)
-                    remap_merges(ws_b, merges, insert_row, n_rows)
-
-                    ref_h1 = insert_row + n_rows + 5
-                    ref_h2 = insert_row + n_rows + 6
-
-                    r = insert_row
-                    ws_b.cell(row=r, column=1).value = f"E2E Monthly Performance Tracking _ {brand}（{period_label}）"
-                    ws_b.cell(row=r, column=1).font = FONT_BOLD
-                    ws_b.cell(row=r, column=1).fill = FILL_TITLE
-                    r += 1
-                    ws_b.cell(row=r, column=1).value = "Updated:"
-                    ws_b.cell(row=r, column=1).font = FONT_BOLD
-                    ws_b.cell(row=r, column=2).value = "待填写"
-                    r += 1
-                    ws_b.cell(row=r, column=1).value = "Data Period:"
-                    ws_b.cell(row=r, column=1).font = FONT_BOLD
-                    ws_b.cell(row=r, column=2).value = period_label
-                    r += 1
-                    r += 1
-                    ws_b.cell(row=r, column=1).value = "*本次跨域计划名称包含：产品，故计算为产品合计"
-                    r += 1
-
-                    for src_h in (ref_h1, ref_h2):
-                        for c in range(1, 41):
-                            v = ws_b.cell(row=src_h, column=c).value
-                            cell = ws_b.cell(row=r, column=c)
-                            cell.value = v
-                            cell.font = FONT_BOLD
-                            cell.fill = FILL_HEADER
-                            cell.border = BORDER
-                            cell.alignment = ALIGN_CENTER
-                        r += 1
-                    data_start = r
-
-                    for _, row in b_df.iterrows():
-                        product = row.get("产品", "")
-                        cat = get_category(platform_report, brand, product)
-                        vals = {
-                            1: str(row.get("项目名称", product)),
-                            2: product,
-                            3: cat,
-                            7: float(row.get("媒体花费", 0)),
-                            11: float(row.get("阅读数", 0)),
-                            13: float(row.get("进店UV", 0)),
-                            16: float(row.get("购买人数", 0)),
-                            17: float(row.get("渠道新客数", 0)),
+                    if platform_report == "RED":
+                        header_map = {
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流",
+                            5: "红书阅读数", 6: "归因逻辑", 7: "进店UV\n（=商品页浏览）",
+                            8: "进店UV vs 目标", 9: "进店率\n（=进店UV/阅读数)",
+                            10: "购买转化率\n(=购买人数/进店数)", 11: "购买人数",
+                            12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)",
+                            15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)",
+                            17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            18: "全店客单价",
                         }
-                        for c in range(1, 41):
-                            cell = ws_b.cell(row=r, column=c)
-                            cell.border = BORDER
-                            cell.font = FONT_NORMAL
-                            if c in vals:
-                                cell.value = vals[c]
-                        r += 1
-                    data_end = r - 1
+                    else:
+                        header_map = {
+                            2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流",
+                            5: "视频观看数", 6: "归因逻辑", 7: "进店UV\n（=商品页浏览）",
+                            8: "进店UV vs 目标", 9: "进店率\n（=进店UV/阅读数)",
+                            10: "购买转化率\n(=购买人数/进店数)", 11: "购买人数",
+                            12: "渠道新客数", 13: "渠道新客数 vs 目标",
+                            14: "渠道新客占比\n(=渠道新客/购买人数)",
+                            15: "新客成本\n(=媒体花费/渠道新客数)",
+                            16: "预估新客GMV\n(=客单价*新客数)",
+                            17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
+                            18: "全店客单价",
+                        }
 
-                    brand_block_info[brand] = {
-                        "sheet": brand,
-                        "data_start": data_start,
-                        "data_end": data_end,
-                        "categories": b_df["产品"].apply(
-                            lambda p: get_category(platform_report, brand, p)
-                        ).tolist(),
-                    }
+                    for col, val in header_map.items():
+                        ws.cell(row=header_row, column=col).value = val
 
-                # ============================================================
-                # Summary
-                # ============================================================
-                ws = wb["Summary"]
+                    if header_height:
+                        ws.row_dimensions[header_row].height = header_height
 
-                old_title_row = None
-                for row in range(1, ws.max_row + 1):
-                    v = ws.cell(row=row, column=2).value
-                    if v and "Campaign起始日期" in str(v):
-                        old_title_row = row
-                        break
-                if old_title_row is None:
-                    st.error("找不到 Summary 原 Campaign 标题行。")
-                    st.stop()
+                    # ===== 步骤 8：写数据行（样式复制原第一数据行） =====
+                    for i, (_, row) in enumerate(df_to_write.iterrows()):
+                        r = header_row + 1 + i
+                        apply_style(r, data_style)
 
-                n_data = len(df_to_write)
-                n_ave = 4
-                n_rows = 2 + n_data + n_ave
+                        ws.cell(row=r, column=2).value = row.get("品牌", "")
+                        ws.cell(row=r, column=3).value = "RED KFS" if platform_report == "RED" else "DY"
+                        ws.cell(row=r, column=4).value = float(row.get("媒体花费", 0))
+                        ws.cell(row=r, column=5).value = float(row.get("阅读数", 0))
+                        ws.cell(row=r, column=6).value = ""
+                        ws.cell(row=r, column=7).value = float(row.get("进店UV", 0))
+                        ws.cell(row=r, column=8).value = ""
+                        # 衍生指标 → 公式
+                        ws.cell(row=r, column=9).value = f"=G{r}/E{r}"
+                        ws.cell(row=r, column=10).value = f"=K{r}/G{r}"
+                        ws.cell(row=r, column=11).value = float(row.get("购买人数", 0))
+                        ws.cell(row=r, column=12).value = float(row.get("渠道新客数", 0))
+                        ws.cell(row=r, column=13).value = ""
+                        ws.cell(row=r, column=14).value = f"=L{r}/K{r}"
+                        ws.cell(row=r, column=15).value = f"=D{r}/L{r}"
+                        ws.cell(row=r, column=16).value = f"=L{r}*R{r}"
+                        ws.cell(row=r, column=17).value = f"=P{r}/D{r}"
+                        ws.cell(row=r, column=18).value = float(row.get("全店客单价", 0))
 
-                fmap = snapshot_formulas(ws)
-                merges = snapshot_merges(ws)
-                ws.insert_rows(old_title_row, n_rows)
-                shift_formulas(ws, fmap, old_title_row, n_rows)
-                remap_merges(ws, merges, old_title_row, n_rows)
+                        if data_height:
+                            ws.row_dimensions[r].height = data_height
 
-                # 新块标题（B:R 合并）
-                r = old_title_row
-                ws.cell(row=r, column=2).value = f"Campaign起始日期-{period_label}"
-                ws.cell(row=r, column=2).font = FONT_BOLD
-                for c in range(2, 19):
-                    ws.cell(row=r, column=c).fill = FILL_TITLE
-                    ws.cell(row=r, column=c).border = BORDER
-                ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=18)
-                ws.cell(row=r, column=2).alignment = ALIGN_LEFT
-                ws.row_dimensions[r].height = 22
-                r += 1
+                    # ===== 保存 =====
+                    output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    wb.save(output_path)
 
-                # 表头
-                read_label = "红书阅读数" if platform_report == "RED" else "视频观看数"
-                header_map = {
-                    2: "Brand",
-                    3: "Media Format",
-                    4: "媒体花费\n包含KOL+投流",
-                    5: read_label,
-                    6: "归因逻辑",
-                    7: "进店UV\n（=商品页浏览）",
-                    8: "进店UV vs 目标",
-                    9: "进店率\n（=进店UV/阅读数)",
-                    10: "购买转化率\n(=购买人数/进店数)",
-                    11: "购买人数",
-                    12: "渠道新客数",
-                    13: "渠道新客数 vs 目标",
-                    14: "渠道新客占比\n(=渠道新客/购买人数)",
-                    15: "新客成本\n(=媒体花费/渠道新客数)",
-                    16: "预估新客GMV\n(=客单价*新客数)",
-                    17: "预估整体新客ROI\n(=新客GMV/媒体花费)",
-                    18: "全店客单价",
-                }
-                for c in range(2, 19):
-                    cell = ws.cell(row=r, column=c)
-                    cell.value = header_map.get(c, "")
-                    cell.font = FONT_BOLD
-                    cell.fill = FILL_HEADER
-                    cell.border = BORDER
-                    cell.alignment = ALIGN_CENTER
-                ws.row_dimensions[r].height = 45
-                r += 1
-
-                # 数据行
-                for _, row in df_to_write.iterrows():
-                    brand = row.get("品牌", "")
-                    for c in range(2, 19):
-                        cell = ws.cell(row=r, column=c)
-                        cell.border = BORDER
-                        cell.font = FONT_NORMAL
-                    ws.cell(row=r, column=2).value = brand
-                    ws.cell(row=r, column=3).value = "RED KFS" if platform_report == "RED" else "DY"
-                    ws.cell(row=r, column=4).value = float(row.get("媒体花费", 0))
-                    ws.cell(row=r, column=4).number_format = "#,##0"
-                    ws.cell(row=r, column=5).value = float(row.get("阅读数", 0))
-                    ws.cell(row=r, column=5).number_format = "#,##0"
-                    ws.cell(row=r, column=7).value = float(row.get("进店UV", 0))
-                    ws.cell(row=r, column=7).number_format = "#,##0"
-                    ws.cell(row=r, column=9).value = f"=IFERROR(G{r}/E{r},\"-\")"
-                    ws.cell(row=r, column=9).number_format = "0.0%"
-                    ws.cell(row=r, column=10).value = f"=IFERROR(K{r}/G{r},\"-\")"
-                    ws.cell(row=r, column=10).number_format = "0.0%"
-                    ws.cell(row=r, column=11).value = float(row.get("购买人数", 0))
-                    ws.cell(row=r, column=11).number_format = "#,##0"
-                    ws.cell(row=r, column=12).value = float(row.get("渠道新客数", 0))
-                    ws.cell(row=r, column=12).number_format = "#,##0"
-                    ws.cell(row=r, column=14).value = f"=IFERROR(L{r}/K{r},\"-\")"
-                    ws.cell(row=r, column=14).number_format = "0.0%"
-                    ws.cell(row=r, column=15).value = f"=IFERROR(D{r}/L{r},\"-\")"
-                    ws.cell(row=r, column=15).number_format = "#,##0"
-                    ws.cell(row=r, column=16).value = f"=IFERROR(L{r}*R{r},\"-\")"
-                    ws.cell(row=r, column=16).number_format = "#,##0"
-                    ws.cell(row=r, column=17).value = f"=IFERROR(P{r}/D{r},\"-\")"
-                    ws.cell(row=r, column=17).number_format = "0.0"
-                    ws.cell(row=r, column=18).value = float(row.get("全店客单价", 0))
-                    ws.cell(row=r, column=18).number_format = "#,##0"
-                    ws.row_dimensions[r].height = 20
-                    r += 1
-
-                # Ave. 4 行（无边框）
-                def _ratio(subset, num_col, den_col):
-                    num_parts, den_parts = [], []
-                    for b in subset:
-                        info = brand_block_info.get(b)
-                        if not info:
-                            continue
-                        ds, de = info["data_start"], info["data_end"]
-                        sh = info["sheet"]
-                        num_parts.append(f"'{sh}'!{num_col}{ds}:{num_col}{de}")
-                        den_parts.append(f"'{sh}'!{den_col}{ds}:{den_col}{de}")
-                    if not num_parts:
-                        return "-"
-                    return f"=IFERROR(SUM({','.join(num_parts)})/SUM({','.join(den_parts)}),\"-\")"
-
-                skincare, makeup, fragrance, all_brands = [], [], [], []
-                for brand in df_to_write["品牌"].unique():
-                    info = brand_block_info.get(brand)
-                    cats = set(info["categories"]) if info else set()
-                    all_brands.append(brand)
-                    if any(c == "Skincare" for c in cats):
-                        skincare.append(brand)
-                    if any(c in ("Make up", "Makeup") for c in cats):
-                        makeup.append(brand)
-                    if any(c == "Fragrance" for c in cats):
-                        fragrance.append(brand)
-
-                ave_defs = [
-                    ("品牌组合 护肤 Ave.", skincare),
-                    ("品牌组合 FRAG. Ave.", fragrance),
-                    ("品牌组合 彩妆 Ave.", makeup),
-                    ("品牌组合 Ave.", all_brands),
-                ]
-                for label, subset in ave_defs:
-                    ws.cell(row=r, column=7).value = label
-                    ws.cell(row=r, column=7).font = FONT_NORMAL
-                    ws.cell(row=r, column=9).value = _ratio(subset, "G", "E")
-                    ws.cell(row=r, column=9).number_format = "0.0%"
-                    ws.cell(row=r, column=10).value = _ratio(subset, "K", "G")
-                    ws.cell(row=r, column=10).number_format = "0.0%"
-                    ws.cell(row=r, column=15).value = _ratio(subset, "D", "L")
-                    ws.cell(row=r, column=15).number_format = "#,##0"
-                    r += 1
-
-                # 保存
-                output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                wb.save(output_path)
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="⬇ 下载报告 Excel",
-                        data=f,
-                        file_name=f"E2E_{platform_report}_报告.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                st.success(f"报告已生成：Summary {n_data} 品牌 + 4 Ave.；品牌 sheet {len(brand_block_info)} 个已更新。")
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="⬇ 下载报告 Excel",
+                            data=f,
+                            file_name=f"E2E_{platform_report}_报告.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    st.success(f"报告已生成：{n_data} 条 {platform_report} 数据，共插入 {n_rows} 行。")
 
             except Exception as e:
                 st.error(f"生成失败：{str(e)}")
@@ -1107,7 +941,6 @@ elif page == "📄 报告输出":
                 st.code(traceback.format_exc())
 
         st.markdown('</div>', unsafe_allow_html=True)
-    
         
 # ============ 页面：历史趋势 ============
 elif page == "📈 历史趋势":
