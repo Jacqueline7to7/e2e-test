@@ -730,6 +730,8 @@ elif page == "🧮 计算质检":
 # ============ 页面：报告输出 ============
 elif page == "📄 报告输出":
     import re
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
     st.markdown('<div class="page-title">报告输出</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="page-subtitle">周期：{period_filter} · 平台：{platform_filter} · 品牌：{brand_filter}</div>', unsafe_allow_html=True)
 
@@ -745,7 +747,7 @@ elif page == "📄 报告输出":
         with col2:
             period_label = st.text_input("周期标签", value="2026.09.30")
 
-        st.caption(f"将在 Summary sheet 顶部插入 {period_label} 数据块，保留原有历史数据。")
+        st.caption(f"将在原数据块上方插入 {period_label} 数据块，样式完全复制原块。")
 
         if st.button("生成报告", type="primary"):
             try:
@@ -764,22 +766,75 @@ elif page == "📄 报告输出":
                     wb = openpyxl.load_workbook(template_path)
                     ws = wb["Summary"]
 
-                    insert_row = 8
-                    n_data = len(df_to_write)
-                    n_rows = 2 + n_data  # 标题 + 表头 + N 数据行
+                    # ===== 步骤 1：找到原数据块的行位置 =====
+                    old_title_row = None
+                    for row in range(1, ws.max_row + 1):
+                        val = ws.cell(row=row, column=2).value
+                        if val and "Campaign起始日期" in str(val):
+                            old_title_row = row
+                            break
 
-                    # ===== 步骤 1：读取插入前所有公式 =====
+                    if old_title_row is None:
+                        st.error("找不到原 Campaign 标题行，请检查模板结构。")
+                        st.stop()
+
+                    old_header_row = None
+                    for row in range(old_title_row + 1, ws.max_row + 1):
+                        val = ws.cell(row=row, column=2).value
+                        if val == "Brand":
+                            old_header_row = row
+                            break
+
+                    old_data_row = old_header_row + 1
+
+                    # ===== 步骤 2：捕获原块样式 =====
+                    NCOLS = 30
+
+                    def capture_style(row):
+                        result = {}
+                        for c in range(1, NCOLS + 1):
+                            cell = ws.cell(row=row, column=c)
+                            result[c] = {
+                                "font": copy(cell.font),
+                                "fill": copy(cell.fill),
+                                "border": copy(cell.border),
+                                "alignment": copy(cell.alignment),
+                                "number_format": cell.number_format,
+                            }
+                        return result
+
+                    def apply_style(row, style):
+                        for c, s in style.items():
+                            cell = ws.cell(row=row, column=c)
+                            cell.font = copy(s["font"])
+                            cell.fill = copy(s["fill"])
+                            cell.border = copy(s["border"])
+                            cell.alignment = copy(s["alignment"])
+                            cell.number_format = s["number_format"]
+
+                    title_style = capture_style(old_title_row)
+                    header_style = capture_style(old_header_row)
+                    data_style = capture_style(old_data_row)
+
+                    title_height = ws.row_dimensions[old_title_row].height
+                    header_height = ws.row_dimensions[old_header_row].height
+                    data_height = ws.row_dimensions[old_data_row].height
+
+                    # ===== 步骤 3：保存所有公式 =====
                     formula_map = {}
                     for row in ws.iter_rows():
                         for cell in row:
                             if isinstance(cell.value, str) and cell.value.startswith("="):
-                                formula_map[cell.coordinate] = cell.value
+                                formula_map[(cell.row, cell.column)] = cell.value
 
-                    # ===== 步骤 2：插入行 =====
+                    # ===== 步骤 4：插入行 =====
+                    n_data = len(df_to_write)
+                    n_rows = 2 + n_data   # 标题 + 表头 + N 数据
+                    insert_row = old_title_row
                     ws.insert_rows(insert_row, n_rows)
 
-                    # ===== 步骤 3：修正插入点以下原数据的公式引用 =====
-                    pattern = re.compile(r'(\$?)([A-Z]+)(\$?)(\d+)')
+                    # ===== 步骤 5：修正所有公式的行号引用 =====
+                    pattern = re.compile(r'(\$?)([A-Z]{1,3})(\$?)(\d+)')
 
                     def shift_ref(match):
                         cd, col, rd, rn = match.groups()
@@ -788,25 +843,25 @@ elif page == "📄 报告输出":
                             rn += n_rows
                         return f"{cd}{col}{rd}{rn}"
 
-                    for old_coord, formula in formula_map.items():
-                        m = re.match(r'([A-Z]+)(\d+)', old_coord)
-                        old_col, old_row = m.group(1), int(m.group(2))
-                        if old_row >= insert_row:
-                            new_row = old_row + n_rows
-                            new_formula = pattern.sub(shift_ref, formula)
-                            ws[f"{old_col}{new_row}"] = new_formula
+                    for (old_r, old_c), formula in formula_map.items():
+                        new_formula = pattern.sub(shift_ref, formula)
+                        if old_r >= insert_row:
+                            new_r = old_r + n_rows
+                            ws.cell(row=new_r, column=old_c).value = new_formula
+                        else:
+                            ws.cell(row=old_r, column=old_c).value = new_formula
 
-                    # ===== 步骤 4：写标题行 =====
+                    # ===== 步骤 6：写新标题行（样式复制原标题行） =====
                     title_row = insert_row
-                    title_cell = ws.cell(row=title_row, column=2,
-                                         value=f"Campaign起始日期-{period_label}")
-                    title_cell.font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
-                    title_cell.fill = PatternFill(start_color="000000", end_color="000000",
-                                                  fill_type="solid")
-                    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+                    apply_style(title_row, title_style)
+                    ws.cell(row=title_row, column=2).value = f"Campaign起始日期-{period_label}"
+                    if title_height:
+                        ws.row_dimensions[title_row].height = title_height
 
-                    # ===== 步骤 5：写表头行（紧接标题，无空行） =====
+                    # ===== 步骤 7：写新表头行（样式复制原表头行） =====
                     header_row = insert_row + 1
+                    apply_style(header_row, header_style)
+
                     if platform_report == "RED":
                         header_map = {
                             2: "Brand", 3: "Media Format", 4: "媒体花费\n包含KOL+投流",
@@ -834,67 +889,40 @@ elif page == "📄 报告输出":
                             18: "全店客单价",
                         }
 
-                    header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9",
-                                              fill_type="solid")
-                    header_font = Font(name="微软雅黑", bold=True, size=10, color="000000")
-                    header_align = Alignment(horizontal="center", vertical="center",
-                                             wrap_text=True)
-
                     for col, val in header_map.items():
-                        cell = ws.cell(row=header_row, column=col, value=val)
-                        cell.font = header_font
-                        cell.fill = header_fill
-                        cell.alignment = header_align
+                        ws.cell(row=header_row, column=col).value = val
 
-                    # 表头行行高固定 45
-                    ws.row_dimensions[header_row].height = 45
+                    if header_height:
+                        ws.row_dimensions[header_row].height = header_height
 
-                    # ===== 步骤 6：写数据行（衍生指标用公式） =====
-                    data_font = Font(name="微软雅黑", size=10)
-                    data_align = Alignment(horizontal="center", vertical="center")
-
+                    # ===== 步骤 8：写数据行（样式复制原第一数据行） =====
                     for i, (_, row) in enumerate(df_to_write.iterrows()):
                         r = header_row + 1 + i
+                        apply_style(r, data_style)
 
-                        ws.cell(row=r, column=2, value=row.get("品牌", ""))
-                        ws.cell(row=r, column=3, value="RED KFS" if platform_report == "RED" else "DY")
-                        ws.cell(row=r, column=4, value=float(row.get("媒体花费", 0)))
-                        ws.cell(row=r, column=5, value=float(row.get("阅读数", 0)))
-                        ws.cell(row=r, column=6, value="")
-                        ws.cell(row=r, column=7, value=float(row.get("进店UV", 0)))
-                        ws.cell(row=r, column=8, value="")
+                        ws.cell(row=r, column=2).value = row.get("品牌", "")
+                        ws.cell(row=r, column=3).value = "RED KFS" if platform_report == "RED" else "DY"
+                        ws.cell(row=r, column=4).value = float(row.get("媒体花费", 0))
+                        ws.cell(row=r, column=5).value = float(row.get("阅读数", 0))
+                        ws.cell(row=r, column=6).value = ""
+                        ws.cell(row=r, column=7).value = float(row.get("进店UV", 0))
+                        ws.cell(row=r, column=8).value = ""
                         # 衍生指标 → 公式
-                        ws.cell(row=r, column=9, value=f"=G{r}/E{r}")   # 进店率
-                        ws.cell(row=r, column=10, value=f"=K{r}/G{r}")  # 购买转化率
-                        ws.cell(row=r, column=11, value=float(row.get("购买人数", 0)))
-                        ws.cell(row=r, column=12, value=float(row.get("渠道新客数", 0)))
-                        ws.cell(row=r, column=13, value="")
-                        ws.cell(row=r, column=14, value=f"=L{r}/K{r}")  # 渠道新客占比
-                        ws.cell(row=r, column=15, value=f"=D{r}/L{r}")  # 新客成本
-                        ws.cell(row=r, column=16, value=f"=L{r}*R{r}")  # 预估新客GMV
-                        ws.cell(row=r, column=17, value=f"=P{r}/D{r}")  # 预估整体新客ROI
-                        ws.cell(row=r, column=18, value=float(row.get("全店客单价", 0)))
+                        ws.cell(row=r, column=9).value = f"=G{r}/E{r}"
+                        ws.cell(row=r, column=10).value = f"=K{r}/G{r}"
+                        ws.cell(row=r, column=11).value = float(row.get("购买人数", 0))
+                        ws.cell(row=r, column=12).value = float(row.get("渠道新客数", 0))
+                        ws.cell(row=r, column=13).value = ""
+                        ws.cell(row=r, column=14).value = f"=L{r}/K{r}"
+                        ws.cell(row=r, column=15).value = f"=D{r}/L{r}"
+                        ws.cell(row=r, column=16).value = f"=L{r}*R{r}"
+                        ws.cell(row=r, column=17).value = f"=P{r}/D{r}"
+                        ws.cell(row=r, column=18).value = float(row.get("全店客单价", 0))
 
-                        # 统一字体和对齐
-                        for c in range(2, 19):
-                            ws.cell(row=r, column=c).font = data_font
-                            ws.cell(row=r, column=c).alignment = data_align
+                        if data_height:
+                            ws.row_dimensions[r].height = data_height
 
-                        # 数字格式
-                        ws.cell(row=r, column=4).number_format = "#,##0"    # 媒体花费
-                        ws.cell(row=r, column=5).number_format = "#,##0"    # 阅读数
-                        ws.cell(row=r, column=7).number_format = "#,##0"    # 进店UV
-                        ws.cell(row=r, column=9).number_format = "0.0%"     # 进店率
-                        ws.cell(row=r, column=10).number_format = "0.0%"    # 购买转化率
-                        ws.cell(row=r, column=11).number_format = "#,##0"   # 购买人数
-                        ws.cell(row=r, column=12).number_format = "#,##0"   # 渠道新客数
-                        ws.cell(row=r, column=14).number_format = "0.0%"    # 渠道新客占比
-                        ws.cell(row=r, column=15).number_format = "#,##0"   # 新客成本
-                        ws.cell(row=r, column=16).number_format = "#,##0"   # 预估新客GMV
-                        ws.cell(row=r, column=17).number_format = "0.0"     # 预估整体新客ROI
-                        ws.cell(row=r, column=18).number_format = "#,##0"   # 全店客单价
-
-                    # 保存
+                    # ===== 保存 =====
                     output_path = f"output_{platform_report}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                     wb.save(output_path)
 
@@ -913,7 +941,6 @@ elif page == "📄 报告输出":
                 st.code(traceback.format_exc())
 
         st.markdown('</div>', unsafe_allow_html=True)
-
 # ============ 页面：历史趋势 ============
 elif page == "📈 历史趋势":
     st.markdown('<div class="page-title">历史数据与趋势</div>', unsafe_allow_html=True)
